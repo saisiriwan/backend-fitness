@@ -1,5 +1,5 @@
 # POstgreSQL config
-/*หน้าที่: นี่คือ "คลังวัตถุดิบ" ของคุณครับ 
+/*หน้าที่: นี่คือ "คลังวัตถุดิบ" 
 ไฟล์สำคัญ:
 docker-compose.yml : เป็นพิมพ์เขียวสำหรับรัน PostgreSQL Database (db) และ PgAdmin (เว็บสำหรับดูข้อมูลใน DB) 
 docker/Dockerfile : ใช้สำหรับสร้าง Image ของ PostgreSQL
