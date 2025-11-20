@@ -2,11 +2,29 @@ package service
 
 import (
 	"errors"
+	"os"
 	"strings"
+	"time"
+
+	"github.com/golang-jwt/jwt/v5"
+	"golang.org/x/crypto/bcrypt"
 
 	"users/internal/models"
 	"users/internal/repository"
 )
+
+// Structs สำหรับรับข้อมูลจาก Handler (Data Transfer Objects)
+type RegisterRequest struct {
+	FirstName string `json:"firstName" binding:"required"`
+	LastName  string `json:"lastName" binding:"required"`
+	Email     string `json:"email" binding:"required"`
+	Password  string `json:"password" binding:"required"`
+}
+
+type LoginRequest struct {
+	Email    string `json:"email" binding:"required"`
+	Password string `json:"password"`
+}
 
 type UserService interface {
 	GetAllUsers() ([]models.User, error)
@@ -14,15 +32,31 @@ type UserService interface {
 	CreateUser(name, email string) (*models.User, error)
 	UpdateUser(id int, name, email string) (*models.User, error)
 	DeleteUser(id int) error
+
+	// Auth Methods
+	RegisterUser(req RegisterRequest) (*models.User, error)
+	LoginUser(req LoginRequest) (string, error)
+	GetUserByEmail(email string) (*models.User, error)
 }
 
 type userService struct {
-	repo repository.UserRepository
+	repo      repository.UserRepository
+	jwtSecret []byte
 }
 
-// Inject Repository ผ่าน Constructor ตามหลัก DIP
+// NewUserService สร้าง Service ใหม่ พร้อมรับ JWT Secret
+// (ในโค้ดจริงควรอ่าน JWT_SECRET จาก Config แต่นี่เรา Hardcode ไว้ก่อนเพื่อความง่าย)
 func NewUserService(repo repository.UserRepository) UserService {
-	return &userService{repo: repo}
+	// อ่านค่า JWT_SECRET จาก Environment Variable
+	secret := os.Getenv("JWT_SECRET")
+	if secret == "" {
+		secret = "your_very_secret_key_should_be_long"
+	}
+
+	return &userService{
+		repo:      repo,
+		jwtSecret: []byte(secret), // ใช้ค่าที่ได้จาก .env
+	}
 }
 
 func (s *userService) GetAllUsers() ([]models.User, error) {
@@ -38,23 +72,88 @@ func (s *userService) CreateUser(name, email string) (*models.User, error) {
 		return nil, errors.New("name and email are required")
 	}
 	user, err := s.repo.Create(name, email)
-	if err != nil && strings.Contains(err.Error(), "duplicate key") {
-		return nil, errors.New("email already exists")
+	if err != nil {
+		return nil, err
 	}
-	return user, err
+	return user, nil
 }
 
 func (s *userService) UpdateUser(id int, name, email string) (*models.User, error) {
 	if strings.TrimSpace(name) == "" || strings.TrimSpace(email) == "" {
 		return nil, errors.New("name and email are required")
 	}
-	user, err := s.repo.Update(id, name, email)
-	if err != nil && strings.Contains(err.Error(), "duplicate key") {
-		return nil, errors.New("email already exists")
-	}
-	return user, err
+	return s.repo.Update(id, name, email)
 }
 
 func (s *userService) DeleteUser(id int) error {
 	return s.repo.Delete(id)
+}
+
+// ---------------------------------------------------------
+// Auth Methods (ใหม่)
+// ---------------------------------------------------------
+
+func (s *userService) RegisterUser(req RegisterRequest) (*models.User, error) {
+	// 1. Hash รหัสผ่าน
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), 10)
+	if err != nil {
+		return nil, errors.New("failed to hash password")
+	}
+
+	// 2. เตรียมข้อมูล User
+	newUser := models.User{
+		Name:  req.FirstName + " " + req.LastName,
+		Email: req.Email,
+		Role:  "trainer", // Default role
+	}
+
+	// 3. บันทึกลง DB
+	createdUser, err := s.repo.CreateUser(newUser, string(hashedPassword))
+	if err != nil {
+		// เช็ค Error ว่า Email ซ้ำหรือไม่ (ขึ้นอยู่กับ Driver ของ DB)
+		// เพื่อความง่าย เราจะส่ง error กลับไปเลย
+		return nil, errors.New("failed to create user (email might already exist)")
+	}
+
+	return createdUser, nil
+}
+
+func (s *userService) GetUserByEmail(email string) (*models.User, error) {
+	return s.repo.GetUserByEmail(email)
+}
+
+func (s *userService) LoginUser(req LoginRequest) (string, error) {
+	// 1. ดึง User จาก DB
+	user, err := s.repo.GetUserByEmail(req.Email)
+	if err != nil {
+		return "", errors.New("invalid email or password")
+	}
+
+	// 2. เทียบรหัสผ่าน
+	// กรณีที่ 1: Login ปกติ (มี Password ส่งมา) -> ต้องเช็ค bcrypt
+	if req.Password != "" {
+		err = bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(req.Password))
+		if err != nil {
+			return "", errors.New("invalid email or password")
+		}
+	}
+	// กรณีที่ 2: Google Login (Password เป็น "") -> ข้ามการเช็ค (ถือว่า Google ยืนยันมาแล้ว)
+
+	// 3. สร้าง Access Token (JWT)
+	accessClaims := jwt.MapClaims{
+		"user_id": user.ID,
+		"name":    user.Name,
+		"role":    user.Role,
+		"exp":     time.Now().Add(time.Minute * 15).Unix(), // หมดอายุใน 15 นาที
+	}
+
+	accessToken := jwt.NewWithClaims(jwt.SigningMethodHS256, accessClaims)
+
+	// ใช้ s.jwtSecret ที่อ่านมาจาก .env ใน NewUserService
+	accessString, err := accessToken.SignedString(s.jwtSecret)
+	if err != nil {
+		return "", errors.New("failed to create access token")
+	}
+
+	return accessString, nil
 }

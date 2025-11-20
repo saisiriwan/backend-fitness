@@ -19,6 +19,10 @@ type UserRepository interface {
 	Create(name, email string) (*models.User, error)
 	Update(id int, name, email string) (*models.User, error)
 	Delete(id int) error
+
+	// (เพิ่มฟังก์ชันสำหรับ Auth)
+	CreateUser(user models.User, hashedPassword string) (*models.User, error)
+	GetUserByEmail(email string) (*models.User, error)
 }
 
 type userRepository struct {
@@ -123,4 +127,36 @@ func (r *userRepository) Delete(id int) error {
 		return errors.New("not found")
 	}
 	return nil
+}
+
+// CreateUser (สำหรับ Register)
+func (r *userRepository) CreateUser(user models.User, hashedPassword string) (*models.User, error) {
+	var u models.User
+
+	// (แก้ไข SQL ให้ INSERT ลงคอลัมน์ใหม่ด้วย)
+	err := r.db.QueryRow(
+		"INSERT INTO users (name, email, password_hash, role) VALUES ($1, $2, $3, $4) RETURNING id, name, email, role, created_at, updated_at",
+		user.Name, user.Email, hashedPassword, user.Role,
+	).Scan(&u.ID, &u.Name, &u.Email, &u.Role, &u.CreatedAt, &u.UpdatedAt)
+
+	if err != nil {
+		return nil, err
+	}
+	return &u, nil
+}
+
+// GetUserByEmail (สำหรับ Login)
+func (r *userRepository) GetUserByEmail(email string) (*models.User, error) {
+	var u models.User
+
+	// (แก้ไข SQL ให้ SELECT คอลัมน์ใหม่มาด้วย)
+	err := r.db.QueryRow("SELECT id, name, email, password_hash, role, created_at, updated_at FROM users WHERE email=$1", email).
+		Scan(&u.ID, &u.Name, &u.Email, &u.PasswordHash, &u.Role, &u.CreatedAt, &u.UpdatedAt)
+
+	if err == sql.ErrNoRows {
+		return nil, errors.New("user not found")
+	} else if err != nil {
+		return nil, err
+	}
+	return &u, nil
 }
